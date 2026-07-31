@@ -24,6 +24,3 @@ docker-compose.override.yml
 npm-debug.log*
 
 .DS_Store
-
-# Prisma generated client
-/src/generated/prisma

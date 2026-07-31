@@ -11,6 +11,10 @@ app.get("/health", (_req, res) => {
   res.json({ status: "ok" });
 });
 
+// app.use("/api/datatypes", dataTypesRouter);
+// app.use("/api/datasets",  dataSetsRouter);
+// app.use("/api/scan",      scanRouter);
+
 app.use((_req, res) => {
   res.status(404).json({ error: "Not found" });
 });

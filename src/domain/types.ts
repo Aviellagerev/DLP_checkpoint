@@ -1,4 +1,5 @@
-// Domain types owned by the app — no Prisma imports allowed here.
+// Domain types owned by the app — no database or framework imports allowed here.
+// This file sits at the bottom of the dependency graph and imports nothing.
 export type DataTypeKind = "keywords";
 
 export interface DataType{
