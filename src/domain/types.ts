@@ -30,6 +30,13 @@ export interface CreateDataSetInput {
 }
 export type UpdateDataSetInput = CreateDataSetInput;
 
+// A scan request names one data set; the data types it references are resolved
+// from the database by the route before the engine ever sees them.
+export interface ScanInput {
+  text: string;
+  dataSetId: string;
+}
+
 export interface DetectedObject {
   id: string;
   name: string;
