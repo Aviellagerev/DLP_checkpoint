@@ -1,23 +1,18 @@
-// Dev utility: exercises every repository method against a real Postgres.
-// Run with:  npm run smoke      (needs docker compose up -d first)
+// Tests the repositories against a real Postgres.
 //
-// This verifies the data layer end-to-end without needing any routes to exist yet.
-// It cleans up everything it creates. Safe to delete once the API is working.
+// This is the only script that touches a database. It verifies that the SQL in
+// src/repositories/pg/ actually works — the two-table assembly for data sets, the
+// transactions, and the foreign key — without needing any routes or HTTP.
+//
+// Everything it creates is deleted at the end.
+//
+//   docker compose up -d
+//   npm run smoke
 
 import "dotenv/config";
 import { dataTypeRepository, dataSetRepository } from "../src/repositories";
 import { pool } from "../src/repositories/pg/pool";
-
-let failures = 0;
-
-function check(label: string, condition: boolean, detail?: unknown) {
-  if (condition) {
-    console.log(`  ok    ${label}`);
-  } else {
-    failures++;
-    console.error(`  FAIL  ${label}`, detail !== undefined ? detail : "");
-  }
-}
+import { check, report } from "./check";
 
 async function main() {
   console.log("\ndata types");
@@ -29,80 +24,78 @@ async function main() {
     content: ["secret", "confidential"],
     threshold: 2,
   });
-  check("create returns a generated uuid", /^[0-9a-f-]{36}$/.test(dt.id), dt.id);
-  check("create round-trips the content array", dt.content.length === 2, dt.content);
-  check("threshold comes back as a number", typeof dt.threshold === "number");
+  check("create generates a uuid", dt.id.length, 36);
+  check("create round-trips the keyword array", dt.content, ["secret", "confidential"]);
+  check("threshold comes back as a number", typeof dt.threshold, "number");
 
-  const fetched = await dataTypeRepository.findById(dt.id);
-  check("findById finds it", fetched?.id === dt.id);
-  check("findById on unknown id returns null", (await dataTypeRepository.findById("nope")) === null);
+  check("findById returns the row", (await dataTypeRepository.findById(dt.id))?.name, "Smoke Keywords");
+  check("findById on unknown id is null", await dataTypeRepository.findById("nope"), null);
 
-  const many = await dataTypeRepository.findManyByIds([dt.id, "nonexistent"]);
-  check("findManyByIds ignores unknown ids", many.length === 1, many.length);
-  check("findManyByIds([]) returns []", (await dataTypeRepository.findManyByIds([])).length === 0);
+  // findManyByIds is the bulk lookup the scan flow uses. Unknown ids are simply absent
+  // from the result rather than an error.
+  const many = await dataTypeRepository.findManyByIds([dt.id, "nope"]);
+  check("findManyByIds skips unknown ids", many.length, 1);
+  check("findManyByIds([]) returns []", await dataTypeRepository.findManyByIds([]), []);
 
+  // Update is a full replace: every column is overwritten.
   const updated = await dataTypeRepository.update(dt.id, {
-    name: "Smoke Keywords v2",
+    name: "Smoke v2",
     description: "updated",
     type: "keywords",
     content: ["secret"],
     threshold: 1,
   });
-  check("update replaces every field", updated?.name === "Smoke Keywords v2" && updated?.content.length === 1);
-  check("update on unknown id returns null", (await dataTypeRepository.update("nope", {
-    name: "x", description: "x", type: "keywords", content: ["x"], threshold: 1,
-  })) === null);
+  check("update replaces every field", [updated?.name, updated?.content, updated?.threshold], ["Smoke v2", ["secret"], 1]);
+  check(
+    "update on unknown id is null",
+    await dataTypeRepository.update("nope", { name: "x", description: "", type: "keywords", content: ["x"], threshold: 1 }),
+    null
+  );
 
   console.log("\ndata sets");
 
   const ds = await dataSetRepository.create({ name: "Smoke Set", dataTypeIds: [dt.id] });
-  check("create links the data type", ds.dataTypeIds.length === 1, ds.dataTypeIds);
+  check("create links the data type", ds.dataTypeIds, [dt.id]);
+  check("findById reassembles the links", (await dataSetRepository.findById(ds.id))?.dataTypeIds, [dt.id]);
 
-  const dsFetched = await dataSetRepository.findById(ds.id);
-  check("findById aggregates linked ids", dsFetched?.dataTypeIds[0] === dt.id, dsFetched?.dataTypeIds);
-
-  // The edge case the COALESCE + FILTER in SELECT_DATA_SETS exists for.
+  // A data set with no links must read back as [] — the reason findAll/findById group
+  // the join rows in application code rather than relying on a SQL aggregate.
   const empty = await dataSetRepository.create({ name: "Smoke Empty", dataTypeIds: [] });
-  const emptyFetched = await dataSetRepository.findById(empty.id);
-  check("empty data set reads back as [] not [null]",
-    Array.isArray(emptyFetched?.dataTypeIds) && emptyFetched?.dataTypeIds.length === 0,
-    emptyFetched?.dataTypeIds);
+  check("empty data set reads back as []", (await dataSetRepository.findById(empty.id))?.dataTypeIds, []);
 
-  // Duplicate ids must not blow up the primary key on the join table.
+  // Duplicates are removed before insert, so they cannot violate the join table's
+  // composite primary key.
   const dupes = await dataSetRepository.create({ name: "Smoke Dupes", dataTypeIds: [dt.id, dt.id] });
-  check("duplicate ids are de-duplicated", dupes.dataTypeIds.length === 1, dupes.dataTypeIds);
+  check("duplicate ids are de-duplicated", dupes.dataTypeIds, [dt.id]);
 
-  const dsUpdated = await dataSetRepository.update(ds.id, { name: "Smoke Set v2", dataTypeIds: [] });
-  check("update can remove all links", dsUpdated?.dataTypeIds.length === 0, dsUpdated?.dataTypeIds);
-  check("update persisted the removal",
-    (await dataSetRepository.findById(ds.id))?.dataTypeIds.length === 0);
-  check("update on unknown id returns null",
-    (await dataSetRepository.update("nope", { name: "x", dataTypeIds: [] })) === null);
+  // Update replaces the links wholesale (DELETE then INSERT), so removal works.
+  const cleared = await dataSetRepository.update(ds.id, { name: "Smoke v2", dataTypeIds: [] });
+  check("update can remove all links", cleared?.dataTypeIds, []);
+  check("the removal persisted", (await dataSetRepository.findById(ds.id))?.dataTypeIds, []);
+  check("update on unknown id is null", await dataSetRepository.update("nope", { name: "x", dataTypeIds: [] }), null);
 
-  // A bad data type id must be rejected by the foreign key, not silently stored.
-  let fkRejected = false;
+  // The foreign key is the last line of defence: a data set can never reference a data
+  // type that does not exist, even if the route check were bypassed.
+  let rejected = false;
   try {
-    await dataSetRepository.create({ name: "Smoke Bad FK", dataTypeIds: ["does-not-exist"] });
+    await dataSetRepository.create({ name: "Smoke Bad", dataTypeIds: ["does-not-exist"] });
   } catch {
-    fkRejected = true;
+    rejected = true;
   }
-  check("unknown data type id is rejected by the foreign key", fkRejected);
+  check("foreign key rejects an unknown data type id", rejected, true);
 
   console.log("\ncleanup");
 
-  check("delete data set", (await dataSetRepository.delete(ds.id)) === true);
-  check("delete is idempotent (second call false)", (await dataSetRepository.delete(ds.id)) === false);
+  check("delete returns true", await dataSetRepository.delete(ds.id), true);
+  check("deleting again returns false", await dataSetRepository.delete(ds.id), false);
   await dataSetRepository.delete(empty.id);
   await dataSetRepository.delete(dupes.id);
-  check("delete data type", (await dataTypeRepository.delete(dt.id)) === true);
-  check("delete unknown data type returns false", (await dataTypeRepository.delete("nope")) === false);
+  check("delete data type", await dataTypeRepository.delete(dt.id), true);
+  check("delete unknown data type returns false", await dataTypeRepository.delete("nope"), false);
 }
 
 main()
-  .then(() => {
-    console.log(failures === 0 ? "\nall checks passed\n" : `\n${failures} check(s) failed\n`);
-    process.exitCode = failures === 0 ? 0 : 1;
-  })
+  .then(report)
   .catch((err) => {
     console.error("\nsmoke test crashed:", err);
     process.exitCode = 1;

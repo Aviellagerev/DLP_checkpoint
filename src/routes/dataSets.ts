@@ -2,8 +2,15 @@
 import { Router } from "express"
 import { dataSetRepository, dataTypeRepository } from "../repositories";
 import { validateCreateDataSet,validateUpdateDataSet } from "../validation/dataSets";
+import type { DataSet } from "../domain/types";
 const router = Router();
 
+// The spec names this field data_type_ids, so responses use that spelling. Internally
+// the camelCase name is used everywhere; the translation happens once, here at the
+// boundary — the mirror of the validator accepting either spelling on input.
+function toWire(dataSet: DataSet) {
+    return { id: dataSet.id, name: dataSet.name, data_type_ids: dataSet.dataTypeIds };
+}
 
 async function findMissingDataTypeIds(ids: string[]): Promise<string[]> {
     if (ids.length === 0) return [];
@@ -20,19 +27,19 @@ router.post("/",async(req,res)=>{
     if(missing.length>0){return res.status(400).json({ errors: [`unknown data type ids: ${missing.join(", ")}`] });}
     //now we send it
     const create = await dataSetRepository.create(result.value);
-      res.status(201).json(create);
+      res.status(201).json(toWire(create));
 });
 //read
 router.get("/:id",async(req,res)=>{
     const id = req.params.id;
     const find = await dataSetRepository.findById(id);
-    if(!find){return res.status(404).json({error:"Data set not found :<"});} 
-    res.status(200).json(find);
+    if(!find){return res.status(404).json({error:"Data set not found :<"});}
+    res.status(200).json(toWire(find));
 });
 //read all
 router.get("/",async(_req,res)=>{
     const findAll = await dataSetRepository.findAll();
-    res.json(findAll);
+    res.json(findAll.map(toWire));
 })
 //update
 router.put("/:id",async(req,res)=>{
@@ -43,7 +50,7 @@ router.put("/:id",async(req,res)=>{
     const id = req.params.id;
     const updated = await dataSetRepository.update(id,result.value);
     if(!updated){return res.status(404).json({error:"Data set not found :<"});}
-    res.json(updated);
+    res.json(toWire(updated));
 });
 //delete
 router.delete("/:id",async(req,res)=>{

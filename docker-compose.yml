@@ -7,21 +7,28 @@ services:
       POSTGRES_PASSWORD: dlp
       POSTGRES_DB: dlp
     ports:
-      # Host port 5433, not 5432, so this container does not collide with a
-      # PostgreSQL installed natively on the machine (a common setup). Inside the
-      # container Postgres still listens on 5432 — only the host side is remapped.
-      # DATABASE_URL in .env must therefore use port 5433.
       - "5433:5432"
     volumes:
       - dlp_postgres_data:/var/lib/postgresql/data
-      # Postgres runs everything in this directory on first boot of a fresh volume.
-      # Changed db/init.sql? Re-run with: docker compose down -v && docker compose up -d
       - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U dlp -d dlp"]
       interval: 5s
       timeout: 5s
       retries: 5
+
+  app:
+    build: .
+    restart: unless-stopped
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://dlp:dlp@postgres:5432/dlp
+      PORT: 3000
+    ports:
+      - "3000:3000"
 
 volumes:
   dlp_postgres_data:
