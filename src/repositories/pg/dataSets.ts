@@ -1,41 +1,9 @@
-// Postgres implementation of DataSetRepository.
-//
-// A data set spans two tables (data_sets + data_set_data_types), so reads aggregate
-// the linked ids back into an array and writes run inside a transaction.
-
 import { randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
 import { pool } from "./pool";
 import type { DataSetRepository } from "../types";
 import type { DataSet } from "../../domain/types";
 
-interface DataSetRow {
-  id: string;
-  name: string;
-  data_type_ids: string[];
-}
-
-function toDomain(row: DataSetRow): DataSet {
-  return { id: row.id, name: row.name, dataTypeIds: row.data_type_ids };
-}
-
-// A data set with no links LEFT JOINs to one all-NULL row, and a bare array_agg would
-// turn that into [null]. FILTER drops the NULL, and COALESCE turns the now-empty
-// aggregate into '{}' so the caller always gets a real array.
-const SELECT_DATA_SETS = `
-  SELECT ds.id,
-         ds.name,
-         COALESCE(
-           array_agg(link.data_type_id ORDER BY link.data_type_id)
-             FILTER (WHERE link.data_type_id IS NOT NULL),
-           '{}'
-         ) AS data_type_ids
-    FROM data_sets ds
-    LEFT JOIN data_set_data_types link ON link.data_set_id = ds.id
-`;
-
-// Reads sort the aggregated ids, so writes store a sorted, de-duplicated list. That
-// way the body returned by POST/PUT is identical to what a later GET produces.
 function normalizeIds(ids: string[]): string[] {
   return [...new Set(ids)].sort();
 }
@@ -45,30 +13,51 @@ async function linkDataTypes(
   dataSetId: string,
   dataTypeIds: string[]
 ): Promise<void> {
-  if (dataTypeIds.length === 0) return;
-  // unnest expands the array into one row per id, so this inserts N links in a
-  // single round trip instead of a loop of queries.
-  await client.query(
-    `INSERT INTO data_set_data_types (data_set_id, data_type_id)
-          SELECT $1, unnest($2::text[])`,
-    [dataSetId, dataTypeIds]
-  );
+  for (const dataTypeId of dataTypeIds) {
+    await client.query(
+      `INSERT INTO data_set_data_types (data_set_id, data_type_id) VALUES ($1, $2)`,
+      [dataSetId, dataTypeId]
+    );
+  }
 }
 
 export const pgDataSetRepository: DataSetRepository = {
   async findAll() {
-    const { rows } = await pool.query<DataSetRow>(
-      `${SELECT_DATA_SETS} GROUP BY ds.id, ds.name ORDER BY ds.name`
+    const sets = await pool.query<{ id: string, name: string }>(
+      `SELECT id,name FROM data_sets ORDER BY name`
     );
-    return rows.map(toDomain);
+    const links = await pool.query<{ data_set_id: string; data_type_id: string }>(
+      `SELECT data_set_id, data_type_id FROM data_set_data_types ORDER BY data_type_id`
+    );
+    const byDataSet = new Map<string, string[]>();
+    for (const row of links.rows) {
+      const list = byDataSet.get(row.data_set_id) ?? [];
+      list.push(row.data_type_id);
+      byDataSet.set(row.data_set_id, list);
+    }
+    return sets.rows.map((s) => ({
+      id: s.id,
+      name: s.name,
+      dataTypeIds: byDataSet.get(s.id) ?? [],
+    }));
   },
 
   async findById(id) {
-    const { rows } = await pool.query<DataSetRow>(
-      `${SELECT_DATA_SETS} WHERE ds.id = $1 GROUP BY ds.id, ds.name`,
-      [id]
+    const set = await pool.query<{ id: string; name: string }>(
+      `SELECT id,name FROM data_sets WHERE id = $1`, [id]
     );
-    return rows[0] ? toDomain(rows[0]) : null;
+    if (!set.rows[0]) { return null; }
+
+    const links = await pool.query<{ data_type_id: string }>(
+      `SELECT data_type_id FROM data_set_data_types
+      WHERE data_set_id = $1
+      ORDER BY data_type_id`, [id]
+    );
+    return {
+      id: set.rows[0].id,
+      name: set.rows[0].name,
+      dataTypeIds: links.rows.map((r) => r.data_type_id),
+    };
   },
 
   async create(input) {
@@ -83,8 +72,7 @@ export const pgDataSetRepository: DataSetRepository = {
         id,
         input.name,
       ]);
-      // Throws on a foreign key violation if an id does not exist. Routes are
-      // expected to reject unknown ids with a 400 before calling this.
+     
       await linkDataTypes(client, id, dataTypeIds);
 
       await client.query("COMMIT");
@@ -93,8 +81,7 @@ export const pgDataSetRepository: DataSetRepository = {
       await client.query("ROLLBACK");
       throw err;
     } finally {
-      // Must run on every path, or the connection leaks and the pool eventually
-      // hangs with no error.
+
       client.release();
     }
   },
@@ -113,7 +100,7 @@ export const pgDataSetRepository: DataSetRepository = {
         return null;
       }
 
-      // Full replace: drop the existing links, then insert the new set.
+
       const dataTypeIds = normalizeIds(input.dataTypeIds);
       await client.query(
         `DELETE FROM data_set_data_types WHERE data_set_id = $1`,
@@ -132,7 +119,7 @@ export const pgDataSetRepository: DataSetRepository = {
   },
 
   async delete(id) {
-    // Links are removed by ON DELETE CASCADE, so this needs no transaction.
+ 
     const { rowCount } = await pool.query(`DELETE FROM data_sets WHERE id = $1`, [
       id,
     ]);
