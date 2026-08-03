@@ -1,0 +1,13 @@
+
+* text=auto
+
+# Always LF, on every platform: these are executed by a shell or by Postgres.
+*.sh   text eol=lf
+*.sql  text eol=lf
+
+# Source and config — LF everywhere keeps diffs clean across machines.
+*.ts   text eol=lf
+*.json text eol=lf
+*.yml  text eol=lf
+*.md   text eol=lf
+Dockerfile text eol=lf
