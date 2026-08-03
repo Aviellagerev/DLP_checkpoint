@@ -1,5 +1,4 @@
-// Hand-written shape validation for Data Set request bodies.
-// Referential checks (do these ids exist?) belong in the route, not here.
+
 import type {  CreateDataSetInput } from "../domain/types";
 import { type ValidationResult, isPlainObject, isNonEmptyString } from "./result";
 

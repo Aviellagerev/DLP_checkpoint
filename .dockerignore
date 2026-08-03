@@ -1,5 +1,3 @@
-# Everything here is excluded from the build context. Keeping it small makes builds
-# faster and stops host-only files (like .env) from ending up in the image.
 
 node_modules
 dist
